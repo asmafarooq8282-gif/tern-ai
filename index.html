@@ -573,11 +573,12 @@ function renderQuota(){
 // ---- Tern's own AI: a small open model that runs in the visitor's browser ----
 let kind = 'wait';            // 'claude' inside Claude, 'local' on the open web, 'none' if unsupported
 // Each plan tries its strongest model first and steps down if the device cannot run it.
-const CHAIN = {free:['Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct'],
-               ultra:['Qwen2.5-7B-Instruct','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']};
+const CHAIN = {free:['Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct'],
+               ultra:['Qwen3.5-9B','Qwen2.5-7B-Instruct','Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']};
+let engCtx = 4096;   // context window the loaded model is running with
 let skip = {free:0, ultra:0}, fellBack = false;
-try{ skip = Object.assign(skip, JSON.parse(localStorage.getItem('tern-skip'))||{}); }catch(e){}
-const SIZES = {free:'roughly 2 GB', ultra:'roughly 5 GB'};
+try{ skip = Object.assign(skip, JSON.parse(localStorage.getItem('tern-skip2'))||{}); }catch(e){}
+const SIZES = {free:'roughly 3 GB', ultra:'roughly 6 GB'};
 let webllm=null, eng=null, engModel='';
 let localOk = {free:false, ultra:false};
 try{ localOk = Object.assign(localOk, JSON.parse(localStorage.getItem('tern-local-ok'))||{}); }catch(e){}
@@ -592,26 +593,38 @@ async function localReady(plan,onProg){
     if(eng && engModel===id) return;
     if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
     try{
-      eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engModel = id;
-      if(i!==(skip[plan]||0)){ skip[plan]=i; fellBack=true; try{ localStorage.setItem('tern-skip',JSON.stringify(skip)); }catch(e){} }
+      try{ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg},{context_window_size:8192}); engCtx = 8192; }
+      catch(e1){ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engCtx = 4096; }
+      engModel = id;
+      if(i!==(skip[plan]||0)){ skip[plan]=i; fellBack=true; try{ localStorage.setItem('tern-skip2',JSON.stringify(skip)); }catch(e){} }
       return;
     }catch(e){ eng=null; engModel=''; if(i===chain.length-1) throw e; }
   }
+}
+function stripThink(t){
+  t = t.replace(/<think>[\s\S]*?<\/think>/g,'');
+  const i = t.indexOf('<think>'); if(i>=0) t = t.slice(0,i);
+  return t.trim();
 }
 async function localSample(input,opts){
   const stop=()=>{ try{ eng.interruptGenerate(); }catch(e){} };
   opts.signal.addEventListener('abort',stop);
   let text='', truncated=false;
   try{
-    const stream = await eng.chat.completions.create({messages:input,stream:true,temperature:0.4,top_p:0.9,max_tokens:1900});
+    const stream = await eng.chat.completions.create({messages:input,stream:true,temperature:0.4,top_p:0.9,max_tokens: engCtx>4096 ? 3500 : 1900});
     for await (const ch of stream){
       const c0 = ch.choices && ch.choices[0]; if(!c0) continue;
-      if(c0.delta && c0.delta.content){ text+=c0.delta.content; opts.onText({text}); }
+      if(c0.delta && c0.delta.content){
+        text+=c0.delta.content; const shown=stripThink(text);
+        if(shown) opts.onText({text:shown}); else if(opts.onStatus) opts.onStatus('Thinking it through…');
+      }
       if(c0.finish_reason==='length') truncated=true;
     }
   } finally { opts.signal.removeEventListener('abort',stop); }
-  if(opts.signal.aborted){ const e=new Error('stopped'); e.text=text; throw e; }
-  return {text,truncated};
+  const answer = stripThink(text);
+  if(opts.signal.aborted){ const e=new Error('stopped'); e.text=answer; throw e; }
+  if(!answer) throw new Error('it ran out of room before answering');
+  return {text:answer,truncated};
 }
 function localInstructions(){
   const c = chat();
@@ -623,7 +636,7 @@ function localInstructions(){
     + '- Write in clear, natural language with simple Markdown: short paragraphs, lists, **bold** for key terms, code blocks for code. Keep replies as short as the question allows.\n'
     + '- If the user asks you to build or change something they can see or use (a page, calculator, tool, game), reply with one sentence and then exactly one code block marked html containing a complete, self-contained HTML document with inline CSS and JavaScript and no external files. Make it tidy, readable on a phone, with working buttons and sensible example values. When changing an existing artifact, return the whole updated document.\n'
     + '- You cannot access the user\'s computer, files or the internet.';
-  if(c.artifact) s += '\nThe artifact currently open is:\n```html\n'+c.artifact.slice(0,3500)+'\n```';
+  if(c.artifact) s += '\nThe artifact currently open is:\n```html\n'+c.artifact.slice(0, engCtx>4096 ? 7000 : 3500)+'\n```';
   return s;
 }
 
@@ -635,7 +648,7 @@ async function submit(){
   if(kind==='none'){ addMsg('err','This browser cannot run Tern\'s on-device AI. Open the site in a recent Chrome or Edge on a computer.'); return; }
   if(left()<=0){ addMsg('err','You have used all '+LIMITS[state.plan]+' of today\'s messages on the '+(state.plan==='ultra'?'Ultra':'Free')+' plan. The limit resets at midnight.'+(state.plan==='free'?' Ultra allows '+LIMITS.ultra+' a day.':'')); return; }
   if(kind==='local' && !localOk[state.plan]){
-    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+(state.plan==='ultra'?' and needs a strong graphics card (about 6 GB of video memory)':' and needs a fairly recent computer')+'. If your device cannot run it, Tern steps down to a smaller model. After that it starts quickly and works without an account.';
+    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+(state.plan==='ultra'?' and needs a strong graphics card (about 8 GB of video memory)':' and needs a fairly recent computer')+'. If your device cannot run it, Tern steps down to a smaller model. After that it starts quickly and works without an account.';
     $('dl').hidden=false; return; }
   const c = chat(), img = state.img;
   $('prompt').value=''; state.busy=true; $('go').textContent='Stop'; setImg(null);
@@ -643,16 +656,21 @@ async function submit(){
   addMsg('user', img ? text+'\n[image: '+img.name+']' : text); c.history.push({role:'user',content:text});
   const bubble = addMsg('bot','Thinking…');
   const local = kind==='local';
-  let input = c.history.slice(local ? -5 : -20).map(m=>({role:m.role,
-    content: m.role==='assistant' ? m.content.replace(/```html[\s\S]*?(```|$)/gi,'[artifact code is in Outputs]') : m.content}));
-  while(input[0].role!=='user') input.shift();
-  if(local){ input = input.map(m=>({role:m.role,content:m.content.slice(0,800)})); input.unshift({role:'system',content:localInstructions()}); }
-  else input[0] = {role:'user',content:instructions()+'\n\n---\n\n'+input[0].content};
+  const buildInput = ()=>{
+    const big = engCtx>4096;
+    let input = c.history.slice(local ? (big ? -7 : -5) : -20).map(m=>({role:m.role,
+      content: m.role==='assistant' ? m.content.replace(/```html[\s\S]*?(```|$)/gi,'[artifact code is in Outputs]') : m.content}));
+    while(input[0].role!=='user') input.shift();
+    if(local){ input = input.map(m=>({role:m.role,content:m.content.slice(0, big ? 1200 : 800)})); input.unshift({role:'system',content:localInstructions()}); }
+    else input[0] = {role:'user',content:instructions()+'\n\n---\n\n'+input[0].content};
+    return input;
+  };
   const useTools = !local && state.plan==='ultra' && state.access==='allowed';
   let last='';
   state.ctrl = new AbortController();
   const opts = { cache:false, modelTier: state.plan==='ultra' ? 'complex' : 'default', signal: state.ctrl.signal,
-    onText:({text})=>{ last=text; setBot(bubble.d,visible(text)); $('log').scrollTop=$('log').scrollHeight; } };
+    onText:({text})=>{ last=text; setBot(bubble.d,visible(text)); $('log').scrollTop=$('log').scrollHeight; },
+    onStatus:t=>setBot(bubble.d,t) };
   if(img) opts.images=[img];
   if(useTools){ opts.tools=tools; openPanel('desk'); }
   let out=null, stopped=false, truncated=false;
@@ -662,7 +680,7 @@ async function submit(){
       setBot(bubble.d,'Thinking…');
       if(fellBack){ fellBack=false; addMsg('note','This device could not run the larger model, so Tern is using a smaller one.'); }
     }
-    const res = await (local ? localSample : sample)(input,opts);
+    const res = await (local ? localSample : sample)(buildInput(),opts);
     out = res.text || ''; truncated = !!res.truncated;
   }catch(e){
     const aborted = state.ctrl.signal.aborted, partial = last || (e && e.text) || '';
