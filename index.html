@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tern AI Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: a one-screen app shell. Sidebar (navigation, recents, plan) | conversation with the
+   composer pinned at the bottom | Outputs panel (artifact or computer). Stacks to one column on phones. */
+:root{
+  --paper:#F2F4F1; --surface:#FFFFFF; --ink:#13201E; --muted:#5A6966; --line:#D5DBD7;
+  --pine:#0E5A4B; --pine-ink:#FFFFFF; --pine-soft:#DDEBE6;
+  --amber:#B76E00; --amber-soft:#FBEBCB; --danger:#A8321F;
+  --display:"Bricolage Grotesque","Trebuchet MS",sans-serif;
+  --body:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  --r:10px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0F1716; --surface:#172220; --ink:#E8EEEB; --muted:#9BAAA6; --line:#2B3936;
+    --pine:#5CC7AE; --pine-ink:#082019; --pine-soft:#1B332E;
+    --amber:#F0B44A; --amber-soft:#3A2E14; --danger:#F08A76; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0F1716; --surface:#172220; --ink:#E8EEEB; --muted:#9BAAA6; --line:#2B3936;
+  --pine:#5CC7AE; --pine-ink:#082019; --pine-soft:#1B332E;
+  --amber:#F0B44A; --amber-soft:#3A2E14; --danger:#F08A76; color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--surface);color:var(--ink);font:16px/1.5 var(--body)}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--pine);outline-offset:2px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.1}
+[hidden]{display:none !important}
+
+.app{display:grid;grid-template-columns:250px minmax(0,1fr) 400px;height:100%}
+.app.nopanel{grid-template-columns:250px minmax(0,1fr)}
+.app.nopanel .panel{display:none}
+
+/* sidebar */
+.side{background:var(--paper);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;padding:14px 10px 10px}
+.brand{display:flex;align-items:center;gap:9px;font-family:var(--display);font-weight:700;font-size:21px;padding:2px 8px 14px}
+.brand svg{width:26px;height:26px}
+.navbtn{display:flex;align-items:center;gap:11px;width:100%;border:0;background:none;text-align:left;padding:8px 10px;border-radius:8px;font-size:15px}
+.navbtn:hover{background:var(--pine-soft)}
+.navbtn[aria-current="true"]{background:var(--pine-soft);font-weight:500}
+.navbtn svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.sidelabel{font:12px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:18px 10px 6px;margin:0}
+.recents{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;min-height:40px}
+.recents .navbtn{font-size:14px;flex:1;min-width:0}
+.rrow{display:flex;align-items:center;gap:2px}
+.del{border:0;background:none;color:var(--muted);border-radius:6px;padding:4px 9px;font-size:15px;line-height:1.2;flex:none}
+.del:hover{color:var(--danger);background:var(--pine-soft)}
+.del.sure{color:var(--danger);font-size:12px;font-weight:600}
+.recents .navbtn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct{border-top:1px solid var(--line);margin-top:8px;padding:10px 6px 2px;display:flex;align-items:center;gap:10px}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--pine);color:var(--pine-ink);display:grid;place-items:center;font-weight:600;font-size:14px;flex:none}
+.acct .who{flex:1;min-width:0;font-size:14px;line-height:1.25}
+.acct .who small{display:block;color:var(--muted);font-size:12px}
+.linkbtn{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 11px;font-size:13px;white-space:nowrap}
+.linkbtn.up{border-color:var(--amber);color:var(--amber)}
+
+/* main */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line)}
+.topbar h2{font:500 16px var(--body);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.view{flex:1;min-height:0;display:flex;flex-direction:column}
+.log{flex:1;overflow-y:auto;padding:24px 20px 8px}
+.col{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.msg{white-space:pre-wrap;overflow-wrap:anywhere;font-size:16px}
+.msg.user{align-self:flex-end;max-width:85%;background:var(--paper);border:1px solid var(--line);padding:9px 14px;border-radius:14px}
+.msg.bot{align-self:flex-start;max-width:100%;white-space:normal}
+.msg.bot .body>*{margin:0 0 .65em}
+.msg.bot .body>*:last-child{margin-bottom:0}
+.msg.bot h4{font:600 16px var(--body)}
+.msg.bot ul,.msg.bot ol{padding-left:1.3em}
+.msg.bot li{margin:.2em 0}
+.msg.bot code{font:.88em var(--mono);background:var(--paper);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+pre.cb{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-x:auto;font:13px/1.5 var(--mono);white-space:pre}
+.copy{border:0;background:none;color:var(--muted);font-size:12px;padding:4px 0;margin-top:2px}
+.copy:hover{color:var(--ink)}
+.msg.note{align-self:center;color:var(--muted);font-size:13px}
+.msg.err{color:var(--danger);border:1px solid var(--danger);padding:9px 14px;border-radius:var(--r);font-size:14px}
+.outchip{align-self:flex-start;display:flex;align-items:center;gap:10px;border:1px solid var(--line);background:var(--paper);border-radius:var(--r);padding:9px 14px;font-size:14px}
+.outchip:hover{border-color:var(--pine)}
+.outchip small{color:var(--muted);display:block;font-size:12px}
+.hello{margin:auto;max-width:720px;width:100%;padding:20px;display:grid;gap:10px}
+.hello h1{font-size:clamp(28px,4vw,40px);font-weight:700;letter-spacing:-.01em}
+.hello p{margin:0;color:var(--muted)}
+.dock{padding:6px 20px 14px}
+.dock>div{max-width:720px;margin:0 auto}
+.chips{display:flex;gap:8px;flex-wrap:wrap;padding-bottom:10px}
+.chip{border:1px solid var(--line);background:none;border-radius:999px;padding:5px 12px;font-size:13px}
+.chip:hover{border-color:var(--pine)}
+form.send{border:1px solid var(--line);border-radius:16px;background:var(--surface);box-shadow:0 2px 10px rgba(19,32,30,.06);padding:10px 12px 8px}
+form.send:focus-within{border-color:var(--pine)}
+form.send textarea{display:block;width:100%;resize:none;height:52px;border:0;outline:0;background:none;color:var(--ink);font:16px var(--body);padding:4px}
+.sendrow{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.model{font:13px var(--mono);color:var(--muted)}
+.model b{color:var(--ink);font-weight:500}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:2px;gap:2px;background:var(--paper)}
+.seg button{border:0;background:none;border-radius:999px;padding:3px 12px;font-size:13px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--pine);color:var(--pine-ink)}
+.seg button.ultra[aria-pressed="true"]{background:var(--amber);color:var(--surface)}
+.btn{border:0;background:var(--pine);color:var(--pine-ink);border-radius:var(--r);padding:8px 16px;font-weight:600}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:none;border:1px solid var(--line);color:var(--ink);font-weight:500}
+.btn.amber{background:var(--amber);color:var(--surface)}
+.fine{text-align:center;color:var(--muted);font-size:12px;margin:8px 0 0}
+
+/* plans view */
+.page{overflow-y:auto;padding:28px 20px 40px}
+.page>div{max-width:820px;margin:0 auto;display:grid;gap:22px}
+.page h1{font-size:clamp(26px,3.6vw,36px)}
+.plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.plan{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:12px}
+.plan.ultra{border-color:var(--amber);border-width:2px}
+.plan h3{font-size:24px}
+.price{font-family:var(--display);font-size:36px;font-weight:700;line-height:1}
+.price small{font:15px var(--body);color:var(--muted);font-weight:400}
+.plan ul{margin:0;padding:0;list-style:none;display:grid;gap:8px;flex:1}
+.plan li{padding-left:24px;position:relative;font-size:15px}
+.plan li::before{content:"";position:absolute;left:2px;top:.5em;width:10px;height:6px;border-left:2px solid var(--pine);border-bottom:2px solid var(--pine);transform:rotate(-45deg)}
+.plan li.no{color:var(--muted)}
+.plan li.no::before{border:0;height:2px;top:.75em;background:var(--muted);transform:none}
+.steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;counter-reset:s}
+.steps div{border-top:2px solid var(--ink);padding-top:10px;counter-increment:s}
+.steps div::before{content:counter(s,decimal-leading-zero);font:13px var(--mono);color:var(--muted)}
+.steps h3{font-size:18px;margin:4px 0}
+.steps p{margin:0;color:var(--muted);font-size:14px}
+.label{font:12px var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0}
+
+/* outputs panel */
+.panel{border-left:1px solid var(--line);background:var(--paper);display:flex;flex-direction:column;min-height:0;min-width:0}
+.panelhead{display:flex;align-items:center;justify-content:space-between;padding:10px 14px}
+.panelhead h2{font:600 15px var(--body)}
+.x{border:0;background:none;font-size:20px;line-height:1;padding:4px 8px;border-radius:6px}
+.x:hover{background:var(--pine-soft)}
+.tabs{display:flex;border-bottom:1px solid var(--line);padding:0 8px}
+.tabs button{border:0;background:none;padding:8px 12px;font-size:14px;font-weight:500;color:var(--muted);border-bottom:2px solid transparent}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--pine)}
+.lock{font:11px var(--mono);margin-left:6px;padding:1px 6px;border-radius:999px;background:var(--amber-soft);color:var(--amber)}
+.tabpanel{flex:1;display:flex;flex-direction:column;min-height:0;background:var(--surface)}
+.artbar{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 14px;font-size:13px;color:var(--muted);border-bottom:1px solid var(--line)}
+.artbar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.artbar .btn{padding:3px 10px;font-size:13px;flex:none}
+iframe#frame{flex:1;width:100%;min-height:320px;border:0;background:#fff}
+pre#code{flex:1;margin:0;padding:14px;overflow:auto;font:12.5px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.gate{margin:auto;padding:24px;max-width:340px;display:grid;gap:10px;justify-items:start}
+.gate h3{font-size:20px}
+.gate p{margin:0;color:var(--muted);font-size:14px}
+.gate .row{display:flex;gap:8px;flex-wrap:wrap}
+.desk{padding:14px;display:grid;gap:12px;overflow:auto;align-content:start}
+.status{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;font:12px var(--mono);padding:3px 9px;border-radius:999px;background:var(--pine-soft);color:var(--pine)}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.files{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:var(--r)}
+.files li{display:flex;justify-content:space-between;gap:10px;padding:7px 12px;font:13px var(--mono);border-top:1px solid var(--line)}
+.files li:first-child{border-top:0}
+.files li span:last-child{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.files li.changed{background:var(--amber-soft)}
+.acts{margin:0;padding:0;list-style:none;font:12.5px/1.6 var(--mono);color:var(--muted)}
+.small{font-size:13px;color:var(--muted);margin:0}
+
+@media (max-width:1050px){
+  .app{grid-template-columns:220px minmax(0,1fr)}
+  .panel{position:fixed;right:0;top:0;bottom:0;width:min(400px,100%);box-shadow:-8px 0 30px rgba(0,0,0,.15);z-index:5}
+}
+@media (max-width:700px){
+  html,body{height:auto}
+  .app,.app.nopanel{display:block}
+  .side{border-right:0;border-bottom:1px solid var(--line)}
+  .recents{max-height:120px}
+  .main{min-height:80vh}
+  .log{min-height:300px}
+  .plans,.steps{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:no-preference){.msg{animation:in .18s ease-out}@keyframes in{from{transform:translateY(4px)}}}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+  <aside class="side">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2 20 L14 12 L18 16 L30 6 L21 22 L16 18 L9 26 Z" fill="var(--pine)"/></svg>
+      Tern
+    </div>
+    <button class="navbtn" id="newChat" type="button"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat</button>
+    <button class="navbtn" id="navPlans" type="button"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Plans</button>
+    <button class="navbtn" id="navOut" type="button"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M14 5v14"/></svg>Outputs</button>
+    <button class="navbtn" id="navDesk" type="button"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="11" rx="2"/><path d="M8 20h8M12 16v4"/></svg>Computer access</button>
+    <p class="sidelabel">Recents</p>
+    <div class="recents" id="recents"></div>
+    <button class="navbtn" id="clearChats" type="button" style="font-size:13px;color:var(--muted)">Clear chats</button>
+    <div class="acct">
+      <div class="avatar" aria-hidden="true">G</div>
+      <div class="who">Guest<small id="planLabel">Free plan</small></div>
+      <button class="linkbtn up" id="acctSwitch" type="button">Try Ultra</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <h2 id="title">Tip calculator</h2>
+      <button class="linkbtn" id="toggleOut" type="button">Outputs</button>
+    </div>
+
+    <div class="view" id="viewChat">
+      <div class="log" id="log" aria-live="polite"><div class="col" id="col"></div></div>
+      <div class="hello" id="hello" hidden>
+        <h1>What should we build?</h1>
+        <p id="helloSub"></p>
+      </div>
+      <div class="dock"><div>
+        <div class="chips" id="chips"></div>
+        <form class="send" id="send">
+          <textarea id="prompt" placeholder="Ask Tern to build something" aria-label="Message"></textarea>
+          <div class="sendrow">
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <button class="linkbtn" type="button" id="attach" hidden>Add image</button>
+              <input type="file" id="file" accept="image/*" hidden>
+              <button class="linkbtn" type="button" id="fileName" hidden aria-label="Remove image"></button>
+              <div class="model"><b id="modelName">tern-core</b> · computer: <b id="accessName">not included</b></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <div class="seg" role="group" aria-label="Plan">
+                <button id="planFree" type="button" aria-pressed="true">Free</button>
+                <button id="planUltra" type="button" class="ultra" aria-pressed="false">Ultra</button>
+              </div>
+              <button class="btn" id="go" type="submit">Send</button>
+            </div>
+          </div>
+        </form>
+        <p class="fine">Tern is a demonstration. Replies come from Claude and can be wrong. Chats are saved in this browser only.</p>
+      </div></div>
+    </div>
+
+    <div class="view page" id="viewPlans" hidden>
+      <div>
+        <h1>Two plans</h1>
+        <div class="plans">
+          <div class="plan">
+            <p class="label">Tern Free</p>
+            <h3>Core model</h3>
+            <div class="price">$0</div>
+            <ul>
+              <li>The Core model, a strong general model for writing, analysis and code</li>
+              <li>Builds artifacts: pages, calculators, charts and small tools you can use right away</li>
+              <li>Revise any artifact by asking</li>
+              <li class="no">No access to your computer</li>
+            </ul>
+            <button class="btn ghost" type="button" data-plan="free">Use Free</button>
+          </div>
+          <div class="plan ultra">
+            <p class="label">Tern Ultra</p>
+            <h3>Ultra model</h3>
+            <div class="price">$20 <small>per month</small></div>
+            <ul>
+              <li>Everything in Free</li>
+              <li>The Ultra model, the most capable one, for long multi-step work</li>
+              <li>Computer access: reads and edits your files and carries tasks through</li>
+              <li>Access starts only when you allow it, and you can turn it off at any time</li>
+            </ul>
+            <button class="btn amber" type="button" data-plan="ultra">Try Ultra (preview, no payment)</button>
+          </div>
+        </div>
+        <h1 style="margin-top:14px">How computer access works</h1>
+        <div class="steps">
+          <div><h3>Ultra asks</h3><p>The first time a task needs your computer, Tern stops and shows a permission request.</p></div>
+          <div><h3>You decide</h3><p>Allow it or decline. If you decline, Tern keeps helping in the chat and builds artifacts as usual.</p></div>
+          <div><h3>You stay in charge</h3><p>Every action appears in the activity list as it happens. One button turns access off.</p></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="panel" id="panel">
+    <div class="panelhead"><h2>Outputs</h2><button class="x" id="closeOut" type="button" aria-label="Close outputs">×</button></div>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tabArt" aria-selected="true">Artifact</button>
+      <button role="tab" id="tabDesk" aria-selected="false">Computer<span class="lock" id="lockTag">Ultra</span></button>
+    </div>
+    <div class="tabpanel" id="panelArt">
+      <div class="gate" id="artEmpty" hidden><h3>Nothing built yet</h3><p>Ask Tern to build a page, a calculator or a small tool and it opens here.</p></div>
+      <div class="artbar" id="artBar"><span id="artTitle"></span><button class="btn ghost" id="toggleCode" type="button">Show code</button></div>
+      <iframe id="frame" title="Artifact preview" sandbox="allow-scripts"></iframe>
+      <pre id="code" hidden></pre>
+    </div>
+    <div class="tabpanel" id="panelDesk" hidden>
+      <div class="gate" id="gateFree">
+        <p class="label">Ultra only</p>
+        <h3>Free cannot touch your computer</h3>
+        <p>The Core model builds artifacts inside this window and nothing else. Computer access is part of Ultra.</p>
+        <button class="btn amber" type="button" id="gateSwitch">Switch to Ultra (preview)</button>
+      </div>
+      <div class="gate" id="gateAsk" hidden>
+        <p class="label">Permission request</p>
+        <h3>Allow Tern to use this computer?</h3>
+        <p>Tern Ultra will be able to list, read and write files in the folders shown. You can turn this off at any moment.</p>
+        <div class="row">
+          <button class="btn" type="button" id="allow">Allow</button>
+          <button class="btn ghost" type="button" id="deny">Not now</button>
+        </div>
+      </div>
+      <div class="desk" id="desk" hidden>
+        <div class="status"><span class="pill">access allowed</span><button class="btn ghost" type="button" id="revoke">Turn off access</button></div>
+        <p class="small">This is a practice computer that lives inside the page, so you can watch Ultra work safely. A web page cannot reach your real files.</p>
+        <ul class="files" id="files"></ul>
+        <p class="label">Activity</p>
+        <ul class="acts" id="acts"><li>No actions yet.</li></ul>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const EXAMPLE = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+body{font:16px system-ui,sans-serif;margin:0;padding:24px;background:#f6f8f7;color:#13201e}
+h1{font-size:22px;margin:0 0 16px}label{display:block;margin:12px 0 4px;font-size:14px;color:#55625f}
+input{width:100%;padding:10px;font:inherit;border:1px solid #c9d1cd;border-radius:8px;box-sizing:border-box}
+.out{margin-top:18px;padding:14px;background:#fff;border:1px solid #c9d1cd;border-radius:8px;display:grid;gap:6px}
+.out b{font-size:22px}</style></head><body>
+<h1>Tip calculator</h1>
+<label for="bill">Bill</label><input id="bill" type="number" value="48.50" step="0.01">
+<label for="pct">Tip %</label><input id="pct" type="number" value="15">
+<label for="n">People</label><input id="n" type="number" value="2" min="1">
+<div class="out"><span>Tip: <span id="tip"></span></span><span>Total: <span id="tot"></span></span><b>Each pays <span id="each"></span></b></div>
+<script>
+const g=i=>document.getElementById(i);function c(){const b=+g('bill').value||0,p=+g('pct').value||0,n=Math.max(1,+g('n').value||1);
+const t=b*p/100;g('tip').textContent=t.toFixed(2);g('tot').textContent=(b+t).toFixed(2);g('each').textContent=((b+t)/n).toFixed(2)}
+document.querySelectorAll('input').forEach(e=>e.oninput=c);c();<\/script></body></html>`;
+
+const state = { plan:'free', access:'none', busy:false, showCode:false, view:'chat', cur:0,
+  chats:[{ title:'Tip calculator', history:[], artifact:EXAMPLE, artTitle:'Tip calculator',
+    msgs:[{cls:'note',text:'Example conversation'},{cls:'user',text:'Build me a tip calculator.'},
+          {cls:'bot',text:'Done. It is open in Outputs. Ask me to change anything about it.'},{cls:'out',text:'Tip calculator'}] }] };
+let sample = null;
+const chat = () => state.chats[state.cur];
+
+const files = {
+  'Notes/todo.txt': 'call the lab supplier\nbook flights\nrenew domain\ncall the lab supplier\nwater plants',
+  'Notes/ideas.txt': 'newsletter name ideas: Field Notes, The Bench, Signal',
+  'Documents/budget.csv': 'item,amount\nrent,900\ngroceries,310\ninternet,45\ntransport,80',
+  'Desktop/readme.txt': 'Practice computer for the Tern Ultra demo.'
+};
+const changed = new Set();
+
+function act(text){
+  const ul = $('acts');
+  if (ul.dataset.empty !== '0'){ ul.innerHTML=''; ul.dataset.empty='0'; }
+  const li = document.createElement('li'); li.textContent = text; ul.prepend(li);
+}
+function renderFiles(){
+  const ul = $('files'); ul.innerHTML='';
+  Object.keys(files).sort().forEach(p=>{
+    const li=document.createElement('li'); if(changed.has(p)) li.className='changed';
+    const a=document.createElement('span'); a.textContent=p;
+    const b=document.createElement('span'); b.textContent=files[p].length+' chars';
+    li.append(a,b); ul.append(li);
+  });
+}
+const tools = [
+  {name:'list_files',description:'List every file path on the practice computer.',
+   inputSchema:{type:'object',properties:{}},
+   execute(){ act('listed files'); return Object.keys(files).sort(); }},
+  {name:'read_file',description:'Read the text of one file by path.',
+   inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path']},
+   execute({path}){ if(!(path in files)) throw new Error('No such file: '+path); act('read '+path); return files[path]; }},
+  {name:'write_file',description:'Create or overwrite a text file at a path.',
+   inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content']},
+   execute({path,content}){ if(state.access!=='allowed') throw new Error('Access was turned off.');
+     files[path]=String(content).slice(0,20000); changed.add(path); act('wrote '+path); renderFiles(); return 'saved'; }}
+];
+
+function instructions(){
+  const c = chat();
+  let s = 'You are Tern, a capable and friendly AI assistant on the Tern website. Answer accurately and directly. '
+    + 'For hard questions, work through the steps before giving the answer and check any arithmetic. Say plainly when you are unsure, and ask one short question when a request is too ambiguous to do well. '
+    + 'Format with simple Markdown: short paragraphs, lists, **bold** for key terms, fenced code blocks for code. Match the length of the reply to the question.\n'
+    + 'Artifacts: when the user asks you to build or change something they can see or use (a page, calculator, chart, small tool, game), reply with one or two sentences and then exactly one fenced code block marked html containing a complete self-contained HTML document with inline CSS and JS. No external resources, no network requests, no alert or prompt dialogs, no localStorage. '
+    + 'Make it polished: clear layout, readable type, works at phone width, sensible example values filled in, and it handles empty or invalid input. When changing an existing artifact, return the whole updated document. It is shown beside the chat, so do not repeat the code in your prose.\n';
+  if (c.artifact) s += 'The artifact currently open beside the chat is:\n```html\n' + c.artifact.slice(0,30000) + '\n```\n';
+  if (state.plan==='free')
+    s += 'The user is on the Free plan with the Core model. You cannot access their computer or files. If asked to, say computer access is part of Tern Ultra and offer to build an artifact instead.';
+  else if (state.access==='allowed')
+    s += 'The user is on Ultra and has allowed computer access. You have tools to list, read and write files on a practice computer inside this page. Plan the task, read before you write, carry it out with the tools, then say briefly what you did. Never claim to reach anything beyond those tools.';
+  else
+    s += 'The user is on Ultra but has not allowed computer access. If a task needs their files, ask them to press Allow in the Computer tab of Outputs, and do not pretend to have done it.';
+  return s;
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function inline(s){
+  return esc(s).replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g,'$1<em>$2</em>');
+}
+function md(src){
+  const blocks=[];
+  src=String(src).replace(/```[\w-]*\n?([\s\S]*?)(```|$)/g,(m,c)=>{
+    blocks.push('<pre class="cb">'+esc(c.replace(/\n$/,''))+'</pre>'); return '\n@@B'+(blocks.length-1)+'@@\n'; });
+  let html='',list='',para=[];
+  const flushP=()=>{ if(para.length){ html+='<p>'+para.map(inline).join('<br>')+'</p>'; para=[]; } };
+  const flushL=()=>{ if(list){ html+='</'+list+'>'; list=''; } };
+  src.split('\n').forEach(line=>{
+    let m;
+    if((m=line.match(/^@@B(\d+)@@$/))){ flushP(); flushL(); html+=blocks[+m[1]]||''; }
+    else if((m=line.match(/^#{1,6}\s+(.*)/))){ flushP(); flushL(); html+='<h4>'+inline(m[1])+'</h4>'; }
+    else if((m=line.match(/^\s*[-*•]\s+(.*)/))){ flushP(); if(list!=='ul'){ flushL(); html+='<ul>'; list='ul'; } html+='<li>'+inline(m[1])+'</li>'; }
+    else if((m=line.match(/^\s*\d+[.)]\s+(.*)/))){ flushP(); if(list!=='ol'){ flushL(); html+='<ol>'; list='ol'; } html+='<li>'+inline(m[1])+'</li>'; }
+    else if(!line.trim()){ flushP(); flushL(); }
+    else { flushL(); para.push(line); }
+  });
+  flushP(); flushL(); return html;
+}
+function setBot(d,text){ d.dataset.raw=text; d.firstChild.innerHTML=md(text); }
+
+function node(m){
+  if(m.cls==='out'){
+    const b=document.createElement('button'); b.type='button'; b.className='outchip';
+    const t=document.createElement('span'); t.textContent=m.text;
+    const s=document.createElement('small'); s.textContent='Artifact · open in Outputs'; t.append(s);
+    b.append(t); b.onclick=()=>{ openPanel('art'); }; return b;
+  }
+  const d=document.createElement('div'); d.className='msg '+m.cls;
+  if(m.cls==='bot'){
+    const body=document.createElement('div'); body.className='body'; d.append(body);
+    const cp=document.createElement('button'); cp.type='button'; cp.className='copy'; cp.textContent='Copy';
+    cp.onclick=()=>{ navigator.clipboard.writeText(d.dataset.raw||'').then(()=>{ cp.textContent='Copied'; setTimeout(()=>cp.textContent='Copy',1200); }).catch(()=>{ cp.textContent='Copy failed'; }); };
+    d.append(cp); setBot(d,m.text);
+  } else d.textContent=m.text;
+  return d;
+}
+function addMsg(cls,text){
+  const m={cls,text}; chat().msgs.push(m);
+  const d=node(m); $('col').append(d); $('hello').hidden=true; $('log').hidden=false;
+  $('log').scrollTop=$('log').scrollHeight; return {m,d};
+}
+function visible(text){
+  const t = text.replace(/```html[\s\S]*?(```|$)/gi,'').trim();
+  if (t) return t;
+  return /```html/i.test(text) ? 'Building the artifact…' : text;
+}
+function save(){
+  try{ localStorage.setItem('tern-v1',JSON.stringify({chats:state.chats.slice(-20),cur:state.cur,plan:state.plan})); }catch(e){}
+}
+function setImg(f){
+  state.img=f||null; $('fileName').hidden=!f; $('fileName').textContent=f ? f.name+'  ×' : ''; $('file').value='';
+}
+function selectTab(which){
+  const art = which==='art';
+  $('tabArt').setAttribute('aria-selected',art); $('tabDesk').setAttribute('aria-selected',!art);
+  $('panelArt').hidden=!art; $('panelDesk').hidden=art;
+}
+function openPanel(which){ $('app').classList.remove('nopanel'); if(which) selectTab(which); }
+function renderArtifact(){
+  const c=chat(), has=!!c.artifact;
+  $('artEmpty').hidden=has; $('artBar').hidden=!has;
+  $('frame').hidden=!has||state.showCode; $('code').hidden=!has||!state.showCode;
+  if(has){ $('frame').srcdoc=c.artifact; $('code').textContent=c.artifact; $('artTitle').textContent=c.artTitle||'Artifact'; }
+  $('toggleCode').textContent = state.showCode ? 'Show preview' : 'Show code';
+}
+function renderChat(){
+  const c=chat(); $('col').innerHTML=''; c.msgs.forEach(m=>$('col').append(node(m)));
+  const empty=!c.msgs.length; $('hello').hidden=!empty; $('log').hidden=empty;
+  $('log').scrollTop=$('log').scrollHeight; renderArtifact();
+}
+function render(){
+  const ultra = state.plan==='ultra', plans = state.view==='plans';
+  $('viewChat').hidden=plans; $('viewPlans').hidden=!plans;
+  $('navPlans').setAttribute('aria-current',plans);
+  $('title').textContent = plans ? 'Plans' : chat().title;
+  $('planFree').setAttribute('aria-pressed',!ultra); $('planUltra').setAttribute('aria-pressed',ultra);
+  $('modelName').textContent = ultra ? 'tern-ultra' : 'tern-core';
+  $('accessName').textContent = !ultra ? 'not included' : state.access==='allowed' ? 'allowed' : 'off';
+  $('planLabel').textContent = ultra ? 'Ultra plan (preview)' : 'Free plan';
+  $('acctSwitch').textContent = ultra ? 'Back to Free' : 'Try Ultra';
+  $('acctSwitch').classList.toggle('up',!ultra);
+  $('lockTag').hidden = ultra;
+  $('gateFree').hidden = ultra;
+  $('gateAsk').hidden = !(ultra && state.access!=='allowed');
+  $('desk').hidden = !(ultra && state.access==='allowed');
+  $('prompt').placeholder = ultra ? 'Ask Tern to build something or work on your files' : 'Ask Tern to build something';
+  $('helloSub').textContent = ultra
+    ? 'You are on Ultra. Tern can build artifacts and, once you allow it, work on your files.'
+    : 'You are on Free with the Core model. Tern can chat and build pages and tools for you.';
+  const chips = ultra
+    ? ['Remove the duplicates from my to-do list','Total my budget and save a summary file','Build a unit converter']
+    : ['Build a unit converter','Make a pomodoro timer','Explain how a rainbow forms'];
+  $('chips').innerHTML='';
+  chips.forEach(c=>{ const b=document.createElement('button'); b.type='button'; b.className='chip'; b.textContent=c;
+    b.onclick=()=>{ if(state.busy) return; $('prompt').value=c; submit(); }; $('chips').append(b); });
+  const r=$('recents'); r.innerHTML='';
+  state.chats.forEach((c,i)=>{ const row=document.createElement('div'); row.className='rrow';
+    const b=document.createElement('button'); b.type='button'; b.className='navbtn';
+    b.setAttribute('aria-current', !plans && i===state.cur);
+    const s=document.createElement('span'); s.textContent=c.title; b.append(s);
+    b.onclick=()=>goChat(i);
+    const x=document.createElement('button'); x.type='button'; x.className='del';
+    const armedDel = state.arm===i;
+    x.textContent = armedDel ? 'Delete?' : '×'; x.classList.toggle('sure',armedDel);
+    x.setAttribute('aria-label', armedDel ? 'Confirm delete of '+c.title : 'Delete chat '+c.title);
+    x.onclick=()=>deleteChat(i);
+    row.append(b,x); r.prepend(row); });
+  renderFiles(); save();
+}
+function deleteChat(i){
+  if(state.busy) return;
+  if(state.arm!==i){ state.arm=i; render(); clearTimeout(state.armT); state.armT=setTimeout(()=>{ state.arm=-1; render(); },3000); return; }
+  clearTimeout(state.armT); state.arm=-1;
+  state.chats.splice(i,1);
+  if(!state.chats.length) state.chats.push({title:'New chat',history:[],msgs:[],artifact:'',artTitle:''});
+  if(i<state.cur) state.cur--; else if(state.cur>=state.chats.length) state.cur=state.chats.length-1;
+  renderChat(); render();
+}
+function goChat(i){
+  if(state.busy) return;
+  state.cur=i; state.view='chat'; renderChat(); render();
+}
+function newChat(){
+  if(state.busy) return;
+  const c=chat();
+  if(c.msgs.length || state.view!=='chat'){
+    const blank = state.chats.findIndex(x=>!x.msgs.length);
+    if(blank>=0) state.cur=blank;
+    else { state.chats.push({title:'New chat',history:[],msgs:[],artifact:'',artTitle:''}); state.cur=state.chats.length-1; }
+  }
+  state.view='chat'; renderChat(); render(); $('prompt').focus();
+}
+function setPlan(p){
+  if(state.plan===p) return;
+  state.plan=p; if(p==='free') state.access='none';
+  if(state.view==='chat' && chat().msgs.length) addMsg('note', p==='ultra' ? 'Switched to Ultra (preview)' : 'Switched to Free');
+  render(); if(p==='ultra') openPanel('desk');
+}
+
+async function submit(){
+  if(state.busy){ if(state.ctrl) state.ctrl.abort(); return; }
+  const text = $('prompt').value.trim();
+  if(!text) return;
+  if(!sample){ addMsg('err','The live chat is not available in this view. Open the page in Claude, press Allow when it asks to use Claude, then try again.'); return; }
+  const c = chat(), img = state.img;
+  $('prompt').value=''; state.busy=true; $('go').textContent='Stop'; setImg(null);
+  if(!c.history.length && c.title==='New chat'){ c.title = text.length>34 ? text.slice(0,34)+'…' : text; render(); }
+  addMsg('user', img ? text+'\n[image: '+img.name+']' : text); c.history.push({role:'user',content:text});
+  const bubble = addMsg('bot','Thinking…');
+  const input = c.history.slice(-20).map(m=>({role:m.role,
+    content: m.role==='assistant' ? m.content.replace(/```html[\s\S]*?(```|$)/gi,'[artifact code is in Outputs]') : m.content}));
+  while(input[0].role!=='user') input.shift();
+  input[0] = {role:'user',content:instructions()+'\n\n---\n\n'+input[0].content};
+  const useTools = state.plan==='ultra' && state.access==='allowed';
+  let last='';
+  state.ctrl = new AbortController();
+  const opts = { cache:false, modelTier: state.plan==='ultra' ? 'complex' : 'default', signal: state.ctrl.signal,
+    onText:({text})=>{ last=text; setBot(bubble.d,visible(text)); $('log').scrollTop=$('log').scrollHeight; } };
+  if(img) opts.images=[img];
+  if(useTools){ opts.tools=tools; openPanel('desk'); }
+  let out=null, stopped=false, truncated=false;
+  try{
+    const res = await sample(input,opts);
+    out = res.text || ''; truncated = !!res.truncated;
+  }catch(e){
+    const aborted = state.ctrl.signal.aborted, partial = last || (e && e.text) || '';
+    if(aborted && partial){ out=partial; stopped=true; }
+    else{
+      c.history.pop(); c.msgs.splice(c.msgs.indexOf(bubble.m),1); bubble.d.remove();
+      if(!aborted){
+        const why = e && e.code==='rate_limited' ? 'Too many requests just now. Wait a minute and send again.'
+          : e && e.code==='not_granted' ? 'Tern needs your permission to use Claude. Send again and press Allow when Claude asks.'
+          : 'That message did not go through. Send it again.';
+        addMsg('err',why);
+      }
+      $('prompt').value=text;
+    }
+  }
+  if(out!==null){
+    c.history.push({role:'assistant',content:out});
+    const m = out.match(/```html\s*([\s\S]*?)```/i) || (stopped ? null : out.match(/```html\s*([\s\S]*)$/i));
+    let shown = visible(out); if(shown==='Building the artifact…') shown = m ? 'Done. It is open in Outputs.' : 'Stopped before the artifact was finished.';
+    bubble.m.text = shown; setBot(bubble.d,shown);
+    if(m && m[1].trim()){
+      c.artifact=m[1].trim(); c.artTitle = text.length>40 ? text.slice(0,40)+'…' : text;
+      addMsg('out',c.artTitle); renderArtifact(); openPanel('art');
+    }
+    if(stopped) addMsg('note','Stopped');
+    else if(truncated) addMsg('note','The reply was cut short. Ask Tern to continue.');
+  }
+  state.busy=false; $('go').textContent='Send'; save();
+}
+
+$('send').addEventListener('submit',e=>{e.preventDefault();submit();});
+$('prompt').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();} });
+$('newChat').onclick=newChat;
+$('navPlans').onclick=()=>{ state.view='plans'; render(); };
+$('navOut').onclick=()=>openPanel('art');
+$('navDesk').onclick=()=>openPanel('desk');
+$('toggleOut').onclick=()=>$('app').classList.toggle('nopanel');
+$('closeOut').onclick=()=>$('app').classList.add('nopanel');
+$('acctSwitch').onclick=()=>setPlan(state.plan==='ultra'?'free':'ultra');
+$('planFree').onclick=()=>setPlan('free'); $('planUltra').onclick=()=>setPlan('ultra');
+$('gateSwitch').onclick=()=>setPlan('ultra');
+document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>{ state.view='chat'; setPlan(b.dataset.plan); renderChat(); render(); });
+$('tabArt').onclick=()=>selectTab('art'); $('tabDesk').onclick=()=>selectTab('desk');
+$('allow').onclick=()=>{ state.access='allowed'; act('access allowed by you'); render(); };
+$('deny').onclick=()=>selectTab('art');
+$('revoke').onclick=()=>{ state.access='off'; act('access turned off by you'); render(); };
+$('toggleCode').onclick=()=>{ state.showCode=!state.showCode; renderArtifact(); };
+
+$('attach').onclick=()=>$('file').click();
+$('file').onchange=()=>{ const f=$('file').files[0]; if(!f) return;
+  if(f.size>5*1024*1024){ addMsg('err','That image is over 5 MB. Choose a smaller one.'); setImg(null); return; } setImg(f); };
+$('fileName').onclick=()=>setImg(null);
+let armed=false;
+$('clearChats').onclick=()=>{ if(state.busy) return;
+  if(!armed){ armed=true; $('clearChats').textContent='Click again to clear all'; setTimeout(()=>{ armed=false; $('clearChats').textContent='Clear chats'; },3000); return; }
+  armed=false; $('clearChats').textContent='Clear chats';
+  state.chats=[{title:'New chat',history:[],msgs:[],artifact:'',artTitle:''}]; state.cur=0; state.view='chat'; renderChat(); render(); };
+try{ const st=JSON.parse(localStorage.getItem('tern-v1'));
+  if(st && Array.isArray(st.chats) && st.chats.length){ state.chats=st.chats; state.cur=Math.min(st.cur|0,st.chats.length-1); state.plan = st.plan==='ultra' ? 'ultra' : 'free'; }
+}catch(e){}
+if(window.matchMedia('(max-width:1050px)').matches) $('app').classList.add('nopanel');
+renderChat(); render();
+(async()=>{ try{ if(window.claude && window.claude.use) sample = await window.claude.use('sample'); }catch(e){ sample=null; }
+  try{ if(sample){ const l=await sample.limits(); if(l && l.images) $('attach').hidden=false; } }catch(e){} })();
+</script>
+</body>
+</html>
