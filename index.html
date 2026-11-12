@@ -474,7 +474,7 @@ function renderArtifact(){
   const c=chat(), has=!!c.artifact;
   $('artEmpty').hidden=has; $('artBar').hidden=!has;
   $('frame').hidden=!has||state.showCode; $('code').hidden=!has||!state.showCode;
-  if(has){ $('frame').srcdoc=c.artifact; $('code').textContent=c.artifact; $('artTitle').textContent=c.artTitle||'Artifact'; }
+  if(has){ frameErrs=[]; $('frame').srcdoc=frameDoc(c.artifact); $('code').textContent=c.artifact; $('artTitle').textContent=c.artTitle||'Artifact'; }
   $('toggleCode').textContent = state.showCode ? 'Show preview' : 'Show code';
 }
 function renderChat(){
@@ -549,6 +549,61 @@ function setPlan(p){
   state.plan=p; if(p==='free') state.access='none';
   if(state.view==='chat' && chat().msgs.length) addMsg('note', p==='ultra' ? 'Switched to Ultra (preview)' : 'Switched to Free');
   render(); if(p==='ultra') openPanel('desk');
+}
+
+// ---- Exact maths: sums in the user's message are computed here, not guessed by the model ----
+function calc(src){
+  let i=0; const s=src.replace(/\s+/g,'');
+  const num=()=>{ const m=/^\d+(\.\d+)?|^\.\d+/.exec(s.slice(i)); if(!m) throw 0; i+=m[0].length; return parseFloat(m[0]); };
+  const atom=()=>{ if(s[i]==='('){ i++; const v=sum(); if(s[i]!==')') throw 0; i++; return v; } if(s[i]==='-'){ i++; return -atom(); } return num(); };
+  const pow=()=>{ const b=atom(); if(s[i]==='^'){ i++; return Math.pow(b,pow()); } return b; };
+  const prod=()=>{ let v=pow(); while(s[i]==='*'||s[i]==='/'){ const o=s[i++]; const r=pow(); v = o==='*' ? v*r : v/r; } return v; };
+  const sum=()=>{ let v=prod(); while(s[i]==='+'||s[i]==='-'){ const o=s[i++]; const r=prod(); v = o==='+' ? v+r : v-r; } return v; };
+  try{ const v=sum(); return (i===s.length && isFinite(v)) ? parseFloat(v.toPrecision(12)) : null; }catch(e){ return null; }
+}
+function findMaths(text){
+  const out=[], seen=new Set();
+  let t=String(text).replace(/(\d),(?=\d{3}\b)/g,'$1').replace(/[×✕]/g,'*').replace(/÷/g,'/').replace(/(\d)\s*x\s*(\d)/gi,'$1*$2');
+  t=t.replace(/(\d+(?:\.\d+)?)\s*%\s*of\s*(\d+(?:\.\d+)?)/gi,(m,a,b)=>{ const v=calc(a+'/100*'+b); if(v!==null) out.push(a+'% of '+b+' = '+v); return ' '; });
+  const re=/[\d(][\d\s.+\-*\/^()]*[\d)]/g; let m;
+  while((m=re.exec(t)) && out.length<5){
+    const e=m[0].trim();
+    if(!/\d\s*[+\-*\/^]\s*[\d(]/.test(e)) continue;               // needs a real operation
+    if(/^[\d.]+(-[\d.]+)+$/.test(e)) continue;                       // dates, ranges, phone-style numbers
+    if(seen.has(e)) continue; seen.add(e);
+    const v=calc(e); if(v!==null) out.push(e.replace(/\s+/g,' ')+' = '+v);
+  }
+  return out;
+}
+
+// ---- Self-fixing artifacts: the preview reports script errors back to Tern ----
+let frameErrs=[];
+window.addEventListener('message',e=>{
+  if(e.source===$('frame').contentWindow && e.data && typeof e.data.ternErr==='string') frameErrs.push(e.data.ternErr.slice(0,200));
+});
+const HOOK = '<script>window.onerror=function(m,s,l){parent.postMessage({ternErr:String(m)+(l?" (line "+l+")":"")},"*")};'
+  + 'window.addEventListener("unhandledrejection",function(e){parent.postMessage({ternErr:String(e.reason)},"*")});<\/script>';
+function frameDoc(html){
+  if(/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i,m=>m+HOOK);
+  return html.replace(/^(\s*<!doctype[^>]*>)?/i,m=>m+HOOK);
+}
+const pause = ms=>new Promise(r=>setTimeout(r,ms));
+async function repairArtifact(c,signal){
+  await pause(1800);
+  if(!frameErrs.length || signal.aborted) return;
+  const err = frameErrs.slice(0,3).join('; ');
+  if(c.artifact.length > (engCtx>4096 ? 7000 : 3500)){ addMsg('note','The artifact has an error Tern could not fix automatically: '+err); return; }
+  addMsg('note','Tern found an error in the artifact and is fixing it.');
+  try{
+    const res = await localSample([
+      {role:'system',content:'You fix HTML pages. Reply with exactly one code block marked html that contains the complete corrected document, and nothing else.'},
+      {role:'user',content:'This page throws an error when it runs: '+err+'\n\n```html\n'+c.artifact+'\n```\n\nFix the error and return the whole corrected page.'}
+    ],{signal,onText(){}});
+    const m = res.text.match(/```html\s*([\s\S]*?)```/i) || res.text.match(/```html\s*([\s\S]*)$/i);
+    if(!m || !m[1].trim()) throw new Error('no page');
+    c.artifact = m[1].trim(); renderArtifact(); await pause(1800);
+    addMsg('note', frameErrs.length ? 'The artifact still has an error: '+frameErrs[0] : 'Fixed.');
+  }catch(e){ if(!signal.aborted) addMsg('note','Tern could not fix the artifact error automatically.'); }
 }
 
 // ---- Tern's own daily limit (kept in this browser) ----
@@ -636,6 +691,10 @@ function localInstructions(){
     + '- Write in clear, natural language with simple Markdown: short paragraphs, lists, **bold** for key terms, code blocks for code. Keep replies as short as the question allows.\n'
     + '- If the user asks you to build or change something they can see or use (a page, calculator, tool, game), reply with one sentence and then exactly one code block marked html containing a complete, self-contained HTML document with inline CSS and JavaScript and no external files. Make it tidy, readable on a phone, with working buttons and sensible example values. When changing an existing artifact, return the whole updated document.\n'
     + '- You cannot access the user\'s computer, files or the internet.';
+  const lastUser = c.history.slice().reverse().find(m=>m.role==='user');
+  const sums = lastUser ? findMaths(lastUser.content) : [];
+  if(sums.length) s += '\nCalculator results for the user\'s message (exact, use these numbers): '+sums.join('; ')+'.';
+  s += '\nToday is '+new Date().toDateString()+'.';
   if(c.artifact) s += '\nThe artifact currently open is:\n```html\n'+c.artifact.slice(0, engCtx>4096 ? 7000 : 3500)+'\n```';
   return s;
 }
@@ -706,6 +765,7 @@ async function submit(){
     if(m && m[1].trim()){
       c.artifact=m[1].trim(); c.artTitle = text.length>40 ? text.slice(0,40)+'…' : text;
       addMsg('out',c.artTitle); renderArtifact(); openPanel('art');
+      if(local && !stopped) await repairArtifact(c,state.ctrl.signal);
     }
     bump();
     if(stopped) addMsg('note','Stopped');
