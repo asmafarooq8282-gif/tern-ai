@@ -572,8 +572,12 @@ function renderQuota(){
 
 // ---- Tern's own AI: a small open model that runs in the visitor's browser ----
 let kind = 'wait';            // 'claude' inside Claude, 'local' on the open web, 'none' if unsupported
-const MODELS = {free:'Qwen2.5-1.5B-Instruct', ultra:'Qwen2.5-3B-Instruct'};
-const SIZES = {free:'roughly 1 GB', ultra:'roughly 2 GB'};
+// Each plan tries its strongest model first and steps down if the device cannot run it.
+const CHAIN = {free:['Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct'],
+               ultra:['Qwen2.5-7B-Instruct','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']};
+let skip = {free:0, ultra:0}, fellBack = false;
+try{ skip = Object.assign(skip, JSON.parse(localStorage.getItem('tern-skip'))||{}); }catch(e){}
+const SIZES = {free:'roughly 2 GB', ultra:'roughly 5 GB'};
 let webllm=null, eng=null, engModel='';
 let localOk = {free:false, ultra:false};
 try{ localOk = Object.assign(localOk, JSON.parse(localStorage.getItem('tern-local-ok'))||{}); }catch(e){}
@@ -581,18 +585,25 @@ async function localReady(plan,onProg){
   if(!webllm) webllm = await import('https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.88/+esm');
   const adapter = await navigator.gpu.requestAdapter();
   if(!adapter){ const e=new Error('no gpu'); e.code='no_gpu'; throw e; }
-  const id = MODELS[plan] + (adapter.features.has('shader-f16') ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
-  if(eng && engModel===id) return;
-  if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
-  eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg});
-  engModel = id;
+  const suf = adapter.features.has('shader-f16') ? '-q4f16_1-MLC' : '-q4f32_1-MLC';
+  const chain = CHAIN[plan];
+  for(let i=Math.min(skip[plan]||0, chain.length-1); i<chain.length; i++){
+    const id = chain[i]+suf;
+    if(eng && engModel===id) return;
+    if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
+    try{
+      eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engModel = id;
+      if(i!==(skip[plan]||0)){ skip[plan]=i; fellBack=true; try{ localStorage.setItem('tern-skip',JSON.stringify(skip)); }catch(e){} }
+      return;
+    }catch(e){ eng=null; engModel=''; if(i===chain.length-1) throw e; }
+  }
 }
 async function localSample(input,opts){
   const stop=()=>{ try{ eng.interruptGenerate(); }catch(e){} };
   opts.signal.addEventListener('abort',stop);
   let text='', truncated=false;
   try{
-    const stream = await eng.chat.completions.create({messages:input,stream:true,temperature:0.6,max_tokens:1900});
+    const stream = await eng.chat.completions.create({messages:input,stream:true,temperature:0.4,top_p:0.9,max_tokens:1900});
     for await (const ch of stream){
       const c0 = ch.choices && ch.choices[0]; if(!c0) continue;
       if(c0.delta && c0.delta.content){ text+=c0.delta.content; opts.onText({text}); }
@@ -604,9 +615,14 @@ async function localSample(input,opts){
 }
 function localInstructions(){
   const c = chat();
-  let s = 'You are Tern, a helpful AI assistant. Answer clearly and briefly, using simple Markdown. Say so when you are not sure. '
-    + 'If the user asks you to build or change something they can see or use (a page, calculator, tool, game), reply with one sentence and then one code block marked html that contains a complete, self-contained HTML document with inline CSS and JavaScript and no external files. '
-    + 'You cannot access the user\'s computer or files.';
+  let s = 'You are Tern, a careful, knowledgeable and friendly AI assistant.\n'
+    + '- Understand what the user really wants before answering. If the request is unclear, ask one short question.\n'
+    + '- Give the direct answer first, then the reasoning or steps. Be accurate and concrete, and use examples when they help.\n'
+    + '- For maths, logic or multi-step problems, work through the steps in order and double-check the result before stating it.\n'
+    + '- If you do not know or are not sure, say so plainly. Never invent facts, names, numbers or sources.\n'
+    + '- Write in clear, natural language with simple Markdown: short paragraphs, lists, **bold** for key terms, code blocks for code. Keep replies as short as the question allows.\n'
+    + '- If the user asks you to build or change something they can see or use (a page, calculator, tool, game), reply with one sentence and then exactly one code block marked html containing a complete, self-contained HTML document with inline CSS and JavaScript and no external files. Make it tidy, readable on a phone, with working buttons and sensible example values. When changing an existing artifact, return the whole updated document.\n'
+    + '- You cannot access the user\'s computer, files or the internet.';
   if(c.artifact) s += '\nThe artifact currently open is:\n```html\n'+c.artifact.slice(0,3500)+'\n```';
   return s;
 }
@@ -619,7 +635,7 @@ async function submit(){
   if(kind==='none'){ addMsg('err','This browser cannot run Tern\'s on-device AI. Open the site in a recent Chrome or Edge on a computer.'); return; }
   if(left()<=0){ addMsg('err','You have used all '+LIMITS[state.plan]+' of today\'s messages on the '+(state.plan==='ultra'?'Ultra':'Free')+' plan. The limit resets at midnight.'+(state.plan==='free'?' Ultra allows '+LIMITS.ultra+' a day.':'')); return; }
   if(kind==='local' && !localOk[state.plan]){
-    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+' and needs a fairly recent computer. After that it starts quickly and works without an account.';
+    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+(state.plan==='ultra'?' and needs a strong graphics card (about 6 GB of video memory)':' and needs a fairly recent computer')+'. If your device cannot run it, Tern steps down to a smaller model. After that it starts quickly and works without an account.';
     $('dl').hidden=false; return; }
   const c = chat(), img = state.img;
   $('prompt').value=''; state.busy=true; $('go').textContent='Stop'; setImg(null);
@@ -644,6 +660,7 @@ async function submit(){
     if(local){
       await localReady(state.plan, p=>setBot(bubble.d,'Getting Tern\'s AI ready… '+Math.round((p.progress||0)*100)+'%'));
       setBot(bubble.d,'Thinking…');
+      if(fellBack){ fellBack=false; addMsg('note','This device could not run the larger model, so Tern is using a smaller one.'); }
     }
     const res = await (local ? localSample : sample)(input,opts);
     out = res.text || ''; truncated = !!res.truncated;
