@@ -113,6 +113,10 @@ form.send textarea{display:block;width:100%;resize:none;height:52px;border:0;out
 .btn.ghost{background:none;border:1px solid var(--line);color:var(--ink);font-weight:500}
 .btn.amber{background:var(--amber);color:var(--surface)}
 .fine{text-align:center;color:var(--muted);font-size:12px;margin:8px 0 0}
+.fine b{color:var(--ink);font-weight:500}
+.dlgate{border:1px solid var(--amber);background:var(--amber-soft);border-radius:var(--r);padding:12px 14px;margin-bottom:10px;display:grid;gap:10px;font-size:14px}
+.dlgate p{margin:0}
+.dlgate .row{display:flex;gap:8px;flex-wrap:wrap}
 
 /* plans view */
 .page{overflow-y:auto;padding:28px 20px 40px}
@@ -220,6 +224,10 @@ pre#code{flex:1;margin:0;padding:14px;overflow:auto;font:12.5px/1.5 var(--mono);
       </div>
       <div class="dock"><div>
         <div class="chips" id="chips"></div>
+        <div class="dlgate" id="dl" hidden>
+          <p id="dlText"></p>
+          <div class="row"><button class="btn" type="button" id="dlGo">Download and start</button><button class="btn ghost" type="button" id="dlNo">Not now</button></div>
+        </div>
         <form class="send" id="send">
           <textarea id="prompt" placeholder="Ask Tern to build something" aria-label="Message"></textarea>
           <div class="sendrow">
@@ -238,7 +246,7 @@ pre#code{flex:1;margin:0;padding:14px;overflow:auto;font:12.5px/1.5 var(--mono);
             </div>
           </div>
         </form>
-        <p class="fine">Tern is a demonstration. Replies come from Claude and can be wrong. Chats are saved in this browser only.</p>
+        <p class="fine"><b id="quota"></b> <span id="fineText">Tern is a demonstration and can be wrong. Chats are saved in this browser only.</span></p>
       </div></div>
     </div>
 
@@ -294,6 +302,7 @@ pre#code{flex:1;margin:0;padding:14px;overflow:auto;font:12.5px/1.5 var(--mono);
       <pre id="code" hidden></pre>
     </div>
     <div class="tabpanel" id="panelDesk" hidden>
+      <p class="small" id="localNote" hidden style="padding:12px 14px;border-bottom:1px solid var(--line)">On this site Tern's on-device AI can chat and build artifacts. The practice computer only responds when Tern is opened inside Claude.</p>
       <div class="gate" id="gateFree">
         <p class="label">Ultra only</p>
         <h3>Free cannot touch your computer</h3>
@@ -510,7 +519,7 @@ function render(){
     x.setAttribute('aria-label', armedDel ? 'Confirm delete of '+c.title : 'Delete chat '+c.title);
     x.onclick=()=>deleteChat(i);
     row.append(b,x); r.prepend(row); });
-  renderFiles(); save();
+  renderFiles(); save(); renderQuota();
 }
 function deleteChat(i){
   if(state.busy) return;
@@ -542,21 +551,88 @@ function setPlan(p){
   render(); if(p==='ultra') openPanel('desk');
 }
 
+// ---- Tern's own daily limit (kept in this browser) ----
+const LIMITS = {free:20, ultra:60};
+function usage(){
+  const d=new Date().toDateString(); let u=null;
+  try{ u=JSON.parse(localStorage.getItem('tern-use')); }catch(e){ u=state.use; }
+  if(!u || u.d!==d) u={d,n:0};
+  return u;
+}
+function left(){ return Math.max(0, LIMITS[state.plan]-usage().n); }
+function bump(){ const u=usage(); u.n++; state.use=u; try{ localStorage.setItem('tern-use',JSON.stringify(u)); }catch(e){} }
+function renderQuota(){
+  $('quota').textContent = left()+' of '+LIMITS[state.plan]+' messages left today.';
+  $('fineText').textContent = kind==='claude' ? 'Replies come from Claude and use your Claude usage. They can be wrong. Chats are saved in this browser only.'
+    : kind==='local' ? 'Tern runs a small open AI model on your own device, with no account. It can be wrong. Chats are saved in this browser only.'
+    : kind==='none' ? 'This browser cannot run Tern\'s on-device AI. Use a recent Chrome or Edge on a computer.'
+    : 'Starting Tern…';
+  $('localNote').hidden = kind!=='local';
+}
+
+// ---- Tern's own AI: a small open model that runs in the visitor's browser ----
+let kind = 'wait';            // 'claude' inside Claude, 'local' on the open web, 'none' if unsupported
+const MODELS = {free:'Qwen2.5-1.5B-Instruct', ultra:'Qwen2.5-3B-Instruct'};
+const SIZES = {free:'roughly 1 GB', ultra:'roughly 2 GB'};
+let webllm=null, eng=null, engModel='';
+let localOk = {free:false, ultra:false};
+try{ localOk = Object.assign(localOk, JSON.parse(localStorage.getItem('tern-local-ok'))||{}); }catch(e){}
+async function localReady(plan,onProg){
+  if(!webllm) webllm = await import('https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.88/+esm');
+  const adapter = await navigator.gpu.requestAdapter();
+  if(!adapter){ const e=new Error('no gpu'); e.code='no_gpu'; throw e; }
+  const id = MODELS[plan] + (adapter.features.has('shader-f16') ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
+  if(eng && engModel===id) return;
+  if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
+  eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg});
+  engModel = id;
+}
+async function localSample(input,opts){
+  const stop=()=>{ try{ eng.interruptGenerate(); }catch(e){} };
+  opts.signal.addEventListener('abort',stop);
+  let text='', truncated=false;
+  try{
+    const stream = await eng.chat.completions.create({messages:input,stream:true,temperature:0.6,max_tokens:1900});
+    for await (const ch of stream){
+      const c0 = ch.choices && ch.choices[0]; if(!c0) continue;
+      if(c0.delta && c0.delta.content){ text+=c0.delta.content; opts.onText({text}); }
+      if(c0.finish_reason==='length') truncated=true;
+    }
+  } finally { opts.signal.removeEventListener('abort',stop); }
+  if(opts.signal.aborted){ const e=new Error('stopped'); e.text=text; throw e; }
+  return {text,truncated};
+}
+function localInstructions(){
+  const c = chat();
+  let s = 'You are Tern, a helpful AI assistant. Answer clearly and briefly, using simple Markdown. Say so when you are not sure. '
+    + 'If the user asks you to build or change something they can see or use (a page, calculator, tool, game), reply with one sentence and then one code block marked html that contains a complete, self-contained HTML document with inline CSS and JavaScript and no external files. '
+    + 'You cannot access the user\'s computer or files.';
+  if(c.artifact) s += '\nThe artifact currently open is:\n```html\n'+c.artifact.slice(0,3500)+'\n```';
+  return s;
+}
+
 async function submit(){
   if(state.busy){ if(state.ctrl) state.ctrl.abort(); return; }
   const text = $('prompt').value.trim();
   if(!text) return;
-  if(!sample){ addMsg('err','The live chat is not available in this view. Open the page in Claude, press Allow when it asks to use Claude, then try again.'); return; }
+  if(kind==='wait'){ addMsg('note','Tern is still starting. Send again in a moment.'); return; }
+  if(kind==='none'){ addMsg('err','This browser cannot run Tern\'s on-device AI. Open the site in a recent Chrome or Edge on a computer.'); return; }
+  if(left()<=0){ addMsg('err','You have used all '+LIMITS[state.plan]+' of today\'s messages on the '+(state.plan==='ultra'?'Ultra':'Free')+' plan. The limit resets at midnight.'+(state.plan==='free'?' Ultra allows '+LIMITS.ultra+' a day.':'')); return; }
+  if(kind==='local' && !localOk[state.plan]){
+    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+' and needs a fairly recent computer. After that it starts quickly and works without an account.';
+    $('dl').hidden=false; return; }
   const c = chat(), img = state.img;
   $('prompt').value=''; state.busy=true; $('go').textContent='Stop'; setImg(null);
   if(!c.history.length && c.title==='New chat'){ c.title = text.length>34 ? text.slice(0,34)+'…' : text; render(); }
   addMsg('user', img ? text+'\n[image: '+img.name+']' : text); c.history.push({role:'user',content:text});
   const bubble = addMsg('bot','Thinking…');
-  const input = c.history.slice(-20).map(m=>({role:m.role,
+  const local = kind==='local';
+  let input = c.history.slice(local ? -5 : -20).map(m=>({role:m.role,
     content: m.role==='assistant' ? m.content.replace(/```html[\s\S]*?(```|$)/gi,'[artifact code is in Outputs]') : m.content}));
   while(input[0].role!=='user') input.shift();
-  input[0] = {role:'user',content:instructions()+'\n\n---\n\n'+input[0].content};
-  const useTools = state.plan==='ultra' && state.access==='allowed';
+  if(local){ input = input.map(m=>({role:m.role,content:m.content.slice(0,800)})); input.unshift({role:'system',content:localInstructions()}); }
+  else input[0] = {role:'user',content:instructions()+'\n\n---\n\n'+input[0].content};
+  const useTools = !local && state.plan==='ultra' && state.access==='allowed';
   let last='';
   state.ctrl = new AbortController();
   const opts = { cache:false, modelTier: state.plan==='ultra' ? 'complex' : 'default', signal: state.ctrl.signal,
@@ -565,7 +641,11 @@ async function submit(){
   if(useTools){ opts.tools=tools; openPanel('desk'); }
   let out=null, stopped=false, truncated=false;
   try{
-    const res = await sample(input,opts);
+    if(local){
+      await localReady(state.plan, p=>setBot(bubble.d,'Getting Tern\'s AI ready… '+Math.round((p.progress||0)*100)+'%'));
+      setBot(bubble.d,'Thinking…');
+    }
+    const res = await (local ? localSample : sample)(input,opts);
     out = res.text || ''; truncated = !!res.truncated;
   }catch(e){
     const aborted = state.ctrl.signal.aborted, partial = last || (e && e.text) || '';
@@ -573,7 +653,9 @@ async function submit(){
     else{
       c.history.pop(); c.msgs.splice(c.msgs.indexOf(bubble.m),1); bubble.d.remove();
       if(!aborted){
-        const why = e && e.code==='rate_limited' ? 'Too many requests just now. Wait a minute and send again.'
+        const why = local ? (e && e.code==='no_gpu' ? 'This device cannot run Tern\'s on-device AI. Try a recent Chrome or Edge on a computer with a graphics card.'
+            : 'Tern\'s on-device AI could not finish that. Start a new chat and try a shorter request. ('+String(e && e.message || e).slice(0,140)+')')
+          : e && e.code==='rate_limited' ? 'Too many requests just now. Wait a minute and send again.'
           : e && e.code==='not_granted' ? 'Tern needs your permission to use Claude. Send again and press Allow when Claude asks.'
           : 'That message did not go through. Send it again.';
         addMsg('err',why);
@@ -590,10 +672,11 @@ async function submit(){
       c.artifact=m[1].trim(); c.artTitle = text.length>40 ? text.slice(0,40)+'…' : text;
       addMsg('out',c.artTitle); renderArtifact(); openPanel('art');
     }
+    bump();
     if(stopped) addMsg('note','Stopped');
     else if(truncated) addMsg('note','The reply was cut short. Ask Tern to continue.');
   }
-  state.busy=false; $('go').textContent='Send'; save();
+  state.busy=false; $('go').textContent='Send'; save(); renderQuota();
 }
 
 $('send').addEventListener('submit',e=>{e.preventDefault();submit();});
@@ -618,6 +701,8 @@ $('attach').onclick=()=>$('file').click();
 $('file').onchange=()=>{ const f=$('file').files[0]; if(!f) return;
   if(f.size>5*1024*1024){ addMsg('err','That image is over 5 MB. Choose a smaller one.'); setImg(null); return; } setImg(f); };
 $('fileName').onclick=()=>setImg(null);
+$('dlGo').onclick=()=>{ localOk[state.plan]=true; try{ localStorage.setItem('tern-local-ok',JSON.stringify(localOk)); }catch(e){} $('dl').hidden=true; submit(); };
+$('dlNo').onclick=()=>{ $('dl').hidden=true; };
 let armed=false;
 $('clearChats').onclick=()=>{ if(state.busy) return;
   if(!armed){ armed=true; $('clearChats').textContent='Click again to clear all'; setTimeout(()=>{ armed=false; $('clearChats').textContent='Clear chats'; },3000); return; }
@@ -628,8 +713,12 @@ try{ const st=JSON.parse(localStorage.getItem('tern-v1'));
 }catch(e){}
 if(window.matchMedia('(max-width:1050px)').matches) $('app').classList.add('nopanel');
 renderChat(); render();
-(async()=>{ try{ if(window.claude && window.claude.use) sample = await window.claude.use('sample'); }catch(e){ sample=null; }
-  try{ if(sample){ const l=await sample.limits(); if(l && l.images) $('attach').hidden=false; } }catch(e){} })();
+(async()=>{
+  try{ if(window.claude && window.claude.use) sample = await window.claude.use('sample'); }catch(e){ sample=null; }
+  kind = sample ? 'claude' : (navigator.gpu ? 'local' : 'none');
+  try{ if(sample){ const l=await sample.limits(); if(l && l.images) $('attach').hidden=false; } }catch(e){}
+  renderQuota();
+})();
 </script>
 </body>
 </html>
