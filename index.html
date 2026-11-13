@@ -631,6 +631,18 @@ let kind = 'wait';            // 'claude' inside Claude, 'local' on the open web
 const CHAIN = {free:['Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct'],
                ultra:['Qwen3.5-9B','Qwen2.5-7B-Instruct','Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']};
 let engCtx = 4096;   // context window the loaded model is running with
+let bigCtx = true;   // ask for the wider window until a device shows it cannot cope
+try{ if(localStorage.getItem('tern-ctx')==='small') bigCtx=false; }catch(e){}
+// When a loaded model dies on this device (usually the graphics card ran out of memory),
+// first retry the same model with the smaller window, then step down to the next model.
+async function stepDown(plan){
+  if(eng){ try{ await eng.unload(); }catch(e){} } eng=null; engModel='';
+  if(bigCtx){ bigCtx=false; try{ localStorage.setItem('tern-ctx','small'); }catch(e){} return true; }
+  const at = Math.min(skip[plan]||0, CHAIN[plan].length-1);
+  if(at < CHAIN[plan].length-1){ skip[plan]=at+1; fellBack=true; try{ localStorage.setItem('tern-skip2',JSON.stringify(skip)); }catch(e){} return true; }
+  return false;
+}
+const tooHeavy = e => /not loaded|reload|device|lost|memory|oom|gpu|buffer|allocat/i.test(String((e && (e.name+' '+e.message)) || e));
 let skip = {free:0, ultra:0}, fellBack = false;
 try{ skip = Object.assign(skip, JSON.parse(localStorage.getItem('tern-skip2'))||{}); }catch(e){}
 const SIZES = {free:'roughly 3 GB', ultra:'roughly 6 GB'};
@@ -648,8 +660,10 @@ async function localReady(plan,onProg){
     if(eng && engModel===id) return;
     if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
     try{
-      try{ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg},{context_window_size:8192}); engCtx = 8192; }
-      catch(e1){ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engCtx = 4096; }
+      if(bigCtx){
+        try{ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg},{context_window_size:8192}); engCtx = 8192; }
+        catch(e1){ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engCtx = 4096; }
+      } else { eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engCtx = 4096; }
       engModel = id;
       if(i!==(skip[plan]||0)){ skip[plan]=i; fellBack=true; try{ localStorage.setItem('tern-skip2',JSON.stringify(skip)); }catch(e){} }
       return;
@@ -734,12 +748,21 @@ async function submit(){
   if(useTools){ opts.tools=tools; openPanel('desk'); }
   let out=null, stopped=false, truncated=false;
   try{
+    let res;
     if(local){
-      await localReady(state.plan, p=>setBot(bubble.d,'Getting Tern\'s AI ready… '+Math.round((p.progress||0)*100)+'%'));
-      setBot(bubble.d,'Thinking…');
+      for(;;){
+        try{
+          await localReady(state.plan, p=>setBot(bubble.d,'Getting Tern\'s AI ready… '+Math.round((p.progress||0)*100)+'%'));
+          setBot(bubble.d,'Thinking…');
+          res = await localSample(buildInput(),opts);
+          break;
+        }catch(e){
+          if(state.ctrl.signal.aborted || !tooHeavy(e) || !(await stepDown(state.plan))) throw e;
+          last=''; setBot(bubble.d,'That setup was too heavy for this device. Trying a lighter one…');
+        }
+      }
       if(fellBack){ fellBack=false; addMsg('note','This device could not run the larger model, so Tern is using a smaller one.'); }
-    }
-    const res = await (local ? localSample : sample)(buildInput(),opts);
+    } else res = await sample(buildInput(),opts);
     out = res.text || ''; truncated = !!res.truncated;
   }catch(e){
     const aborted = state.ctrl.signal.aborted, partial = last || (e && e.text) || '';
@@ -748,6 +771,7 @@ async function submit(){
       c.history.pop(); c.msgs.splice(c.msgs.indexOf(bubble.m),1); bubble.d.remove();
       if(!aborted){
         const why = local ? (e && e.code==='no_gpu' ? 'This device cannot run Tern\'s on-device AI. Try a recent Chrome or Edge on a computer with a graphics card.'
+            : tooHeavy(e) ? 'This device could not run any of Tern\'s on-device models. It needs a computer with a more capable graphics card. ('
             : 'Tern\'s on-device AI could not finish that. Start a new chat and try a shorter request. ('+String(e && e.message || e).slice(0,140)+')')
           : e && e.code==='rate_limited' ? 'Too many requests just now. Wait a minute and send again.'
           : e && e.code==='not_granted' ? 'Tern needs your permission to use Claude. Send again and press Allow when Claude asks.'
