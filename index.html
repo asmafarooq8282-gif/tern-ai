@@ -619,7 +619,7 @@ function bump(){ const u=usage(); u.n++; state.use=u; try{ localStorage.setItem(
 function renderQuota(){
   $('quota').textContent = left()+' of '+LIMITS[state.plan]+' messages left today.';
   $('fineText').textContent = kind==='claude' ? 'Replies come from Claude and use your Claude usage. They can be wrong. Chats are saved in this browser only.'
-    : kind==='local' ? 'Tern runs a small open AI model on your own device, with no account. It can be wrong. Chats are saved in this browser only.'
+    : kind==='local' ? (lite ? 'Tern runs a small open AI model on your own device. This computer has built-in graphics, so replies are very slow. Chats are saved in this browser only.' : 'Tern runs a small open AI model on your own device, with no account. It can be wrong. Chats are saved in this browser only.')
     : kind==='none' ? 'This browser cannot run Tern\'s on-device AI. Use a recent Chrome or Edge on a computer.'
     : 'Starting Tern…';
   $('localNote').hidden = kind!=='local';
@@ -628,47 +628,56 @@ function renderQuota(){
 // ---- Tern's own AI: a small open model that runs in the visitor's browser ----
 let kind = 'wait';            // 'claude' inside Claude, 'local' on the open web, 'none' if unsupported
 // Each plan tries its strongest model first and steps down if the device cannot run it.
-const CHAIN = {free:['Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct'],
-               ultra:['Qwen3.5-9B','Qwen2.5-7B-Instruct','Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']};
+// Computers with built-in (integrated) graphics get a lighter list, since the big models crash there.
+const CHAINS = {
+  full:{free:['Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct'],
+        ultra:['Qwen3.5-9B','Qwen2.5-7B-Instruct','Qwen3.5-4B','Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']},
+  lite:{free:['Qwen2.5-1.5B-Instruct'],
+        ultra:['Qwen2.5-3B-Instruct','Qwen2.5-1.5B-Instruct']}
+};
+const SIZE_TEXT = {full:{free:'roughly 3 GB', ultra:'roughly 6 GB'}, lite:{free:'roughly 1 GB', ultra:'roughly 2 GB'}};
+let lite = false, gpuSuf = '-q4f32_1-MLC';     // set once the graphics adapter is known
+const tier = ()=> lite ? 'lite' : 'full';
+const chainFor = plan => CHAINS[tier()][plan];
+const SIZES = {get free(){ return SIZE_TEXT[tier()].free; }, get ultra(){ return SIZE_TEXT[tier()].ultra; }};
+async function probeGpu(){
+  const adapter = await navigator.gpu.requestAdapter();
+  if(!adapter) return null;
+  const vendor = String((adapter.info && adapter.info.vendor) || '');
+  lite = /intel/i.test(vendor) || !!adapter.isFallbackAdapter || (navigator.deviceMemory||8) < 8;
+  // Older integrated graphics are safer with the plain 32-bit build of each model.
+  gpuSuf = (!lite && adapter.features.has('shader-f16')) ? '-q4f16_1-MLC' : '-q4f32_1-MLC';
+  return adapter;
+}
 let engCtx = 4096;   // context window the loaded model is running with
 let bigCtx = true;   // ask for the wider window until a device shows it cannot cope
 try{ if(localStorage.getItem('tern-ctx')==='small') bigCtx=false; }catch(e){}
-// When a loaded model dies on this device (usually the graphics card ran out of memory),
-// first retry the same model with the smaller window, then step down to the next model.
-async function stepDown(plan){
-  if(eng){ try{ await eng.unload(); }catch(e){} } eng=null; engModel='';
-  if(bigCtx){ bigCtx=false; try{ localStorage.setItem('tern-ctx','small'); }catch(e){} return true; }
-  const at = Math.min(skip[plan]||0, CHAIN[plan].length-1);
-  if(at < CHAIN[plan].length-1){ skip[plan]=at+1; fellBack=true; try{ localStorage.setItem('tern-skip2',JSON.stringify(skip)); }catch(e){} return true; }
+let skip = {full:{free:0,ultra:0}, lite:{free:0,ultra:0}}, fellBack = false;
+try{ const sk=JSON.parse(localStorage.getItem('tern-skip3')); if(sk && sk.full && sk.lite) skip=sk; }catch(e){}
+const saveSkip = ()=>{ try{ localStorage.setItem('tern-skip3',JSON.stringify(skip)); }catch(e){} };
+// When a model dies on this device, remember to use a lighter setup next time:
+// first the smaller window, then the next model down. Returns false when nothing lighter is left.
+function stepDown(plan){
+  if(bigCtx && !lite){ bigCtx=false; try{ localStorage.setItem('tern-ctx','small'); }catch(e){} return true; }
+  const chain = chainFor(plan), at = Math.min(skip[tier()][plan]||0, chain.length-1);
+  if(at < chain.length-1){ skip[tier()][plan]=at+1; saveSkip(); return true; }
   return false;
 }
-const tooHeavy = e => /not loaded|reload|device|lost|memory|oom|gpu|buffer|allocat/i.test(String((e && (e.name+' '+e.message)) || e));
-let skip = {free:0, ultra:0}, fellBack = false;
-try{ skip = Object.assign(skip, JSON.parse(localStorage.getItem('tern-skip2'))||{}); }catch(e){}
-const SIZES = {free:'roughly 3 GB', ultra:'roughly 6 GB'};
+const tooHeavy = e => /not loaded|reload|device|lost|memory|oom|gpu|buffer|allocat|dispos/i.test(String((e && (e.name+' '+e.message)) || e));
 let webllm=null, eng=null, engModel='';
 let localOk = {free:false, ultra:false};
 try{ localOk = Object.assign(localOk, JSON.parse(localStorage.getItem('tern-local-ok'))||{}); }catch(e){}
 async function localReady(plan,onProg){
   if(!webllm) webllm = await import('https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.88/+esm');
-  const adapter = await navigator.gpu.requestAdapter();
+  const adapter = await probeGpu();
   if(!adapter){ const e=new Error('no gpu'); e.code='no_gpu'; throw e; }
-  const suf = adapter.features.has('shader-f16') ? '-q4f16_1-MLC' : '-q4f32_1-MLC';
-  const chain = CHAIN[plan];
-  for(let i=Math.min(skip[plan]||0, chain.length-1); i<chain.length; i++){
-    const id = chain[i]+suf;
-    if(eng && engModel===id) return;
-    if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
-    try{
-      if(bigCtx){
-        try{ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg},{context_window_size:8192}); engCtx = 8192; }
-        catch(e1){ eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engCtx = 4096; }
-      } else { eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}); engCtx = 4096; }
-      engModel = id;
-      if(i!==(skip[plan]||0)){ skip[plan]=i; fellBack=true; try{ localStorage.setItem('tern-skip2',JSON.stringify(skip)); }catch(e){} }
-      return;
-    }catch(e){ eng=null; engModel=''; if(i===chain.length-1) throw e; }
-  }
+  const chain = chainFor(plan);
+  const id = chain[Math.min(skip[tier()][plan]||0, chain.length-1)] + gpuSuf;
+  if(eng && engModel===id) return;
+  if(eng){ try{ await eng.unload(); }catch(e){} eng=null; engModel=''; }
+  const wide = bigCtx && !lite;
+  eng = await webllm.CreateMLCEngine(id,{initProgressCallback:onProg}, wide ? {context_window_size:8192} : undefined);
+  engCtx = wide ? 8192 : 4096; engModel = id;
 }
 function stripThink(t){
   t = t.replace(/<think>[\s\S]*?<\/think>/g,'');
@@ -721,7 +730,7 @@ async function submit(){
   if(kind==='none'){ addMsg('err','This browser cannot run Tern\'s on-device AI. Open the site in a recent Chrome or Edge on a computer.'); return; }
   if(left()<=0){ addMsg('err','You have used all '+LIMITS[state.plan]+' of today\'s messages on the '+(state.plan==='ultra'?'Ultra':'Free')+' plan. The limit resets at midnight.'+(state.plan==='free'?' Ultra allows '+LIMITS.ultra+' a day.':'')); return; }
   if(kind==='local' && !localOk[state.plan]){
-    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+(state.plan==='ultra'?' and needs a strong graphics card (about 8 GB of video memory)':' and needs a fairly recent computer')+'. If your device cannot run it, Tern steps down to a smaller model. After that it starts quickly and works without an account.';
+    $('dlText').textContent = 'Tern\'s '+(state.plan==='ultra'?'Ultra':'Core')+' model runs on your own device. The first use downloads '+SIZES[state.plan]+(lite ? ' (a lighter model, because this computer has built-in graphics; replies will be very slow, around a word every few seconds)' : state.plan==='ultra' ? ' and needs a strong graphics card (about 8 GB of video memory)' : ' and needs a fairly recent computer')+'. If your device cannot run it, Tern steps down to a smaller model. After that it starts quickly and works without an account.';
     $('dl').hidden=false; return; }
   const c = chat(), img = state.img;
   $('prompt').value=''; state.busy=true; $('go').textContent='Stop'; setImg(null);
@@ -757,11 +766,16 @@ async function submit(){
           res = await localSample(buildInput(),opts);
           break;
         }catch(e){
-          if(state.ctrl.signal.aborted || !tooHeavy(e) || !(await stepDown(state.plan))) throw e;
-          last=''; setBot(bubble.d,'That setup was too heavy for this device. Trying a lighter one…');
+          if(state.ctrl.signal.aborted || !tooHeavy(e) || !stepDown(state.plan)) throw e;
+          // A crashed graphics device cannot be reused in this page, so start clean and resend.
+          c.history.pop(); c.msgs.splice(c.msgs.indexOf(bubble.m),1);
+          for(let k=c.msgs.length-1;k>=0;k--){ if(c.msgs[k].cls==='user'){ c.msgs.splice(k,1); break; } }
+          save();
+          try{ sessionStorage.setItem('tern-pending',text); }catch(e2){}
+          setBot(bubble.d,'That setup was too heavy for this device. Restarting with a lighter one…');
+          await pause(1200); location.reload(); await new Promise(()=>{});
         }
       }
-      if(fellBack){ fellBack=false; addMsg('note','This device could not run the larger model, so Tern is using a smaller one.'); }
     } else res = await sample(buildInput(),opts);
     out = res.text || ''; truncated = !!res.truncated;
   }catch(e){
@@ -835,8 +849,13 @@ renderChat(); render();
 (async()=>{
   try{ if(window.claude && window.claude.use) sample = await window.claude.use('sample'); }catch(e){ sample=null; }
   kind = sample ? 'claude' : (navigator.gpu ? 'local' : 'none');
+  if(kind==='local'){ try{ if(!(await probeGpu())) kind='none'; }catch(e){ kind='none'; } }
   try{ if(sample){ const l=await sample.limits(); if(l && l.images) $('attach').hidden=false; } }catch(e){}
   renderQuota();
+  if(kind==='local'){
+    let pending=null; try{ pending=sessionStorage.getItem('tern-pending'); sessionStorage.removeItem('tern-pending'); }catch(e){}
+    if(pending){ $('prompt').value=pending; submit(); }
+  }
 })();
 </script>
 </body>
